@@ -36,9 +36,6 @@ resource "kubernetes_config_map" "spark_config" {
       spark.serializer=org.apache.spark.serializer.KryoSerializer
       spark.sql.adaptive.enabled=true
       spark.sql.adaptive.coalescePartitions.enabled=true
-      
-      # Required JARs
-      spark.jars.packages=org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.4.3,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262
       EOF
 
     "hive-site.xml" = <<-EOF
@@ -159,7 +156,8 @@ resource "kubernetes_deployment" "spark_master" {
             curl -L -o iceberg-spark-runtime-3.5_2.12-1.4.3.jar https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.4.3/iceberg-spark-runtime-3.5_2.12-1.4.3.jar && \
             curl -L -o hadoop-aws-3.3.4.jar https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar && \
             curl -L -o aws-java-sdk-bundle-1.12.262.jar https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar && \
-            curl -L -o postgresql-42.6.0.jar https://jdbc.postgresql.org/download/postgresql-42.6.0.jar
+            curl -L -o postgresql-42.6.0.jar https://jdbc.postgresql.org/download/postgresql-42.6.0.jar && \
+            curl -L -o iceberg-aws-1.4.3.jar https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws/1.4.3/iceberg-aws-1.4.3.jar
             EOT
           ]
 
@@ -195,7 +193,7 @@ resource "kubernetes_deployment" "spark_master" {
 
           env {
             name = "SPARK_MASTER_HOST"
-            value = "0.0.0.0"
+            value = "spark-master-svc"
           }
 
           env {
@@ -206,6 +204,16 @@ resource "kubernetes_deployment" "spark_master" {
           env {
             name = "SPARK_MASTER_WEBUI_PORT"
             value = "8080"
+          }
+
+          env {
+            name = "SPARK_LOCAL_HOSTNAME"
+            value = "spark-master-svc"
+          }
+
+          env {
+            name = "SPARK_DRIVER_HOST"
+            value = "spark-master-svc"
           }
 
           # AWS credentials for S3 access
@@ -300,7 +308,23 @@ resource "kubernetes_service" "spark_master_svc" {
       protocol    = "TCP"
     }
 
-    type = "LoadBalancer"
+    # Add additional ports for driver communication
+    port {
+      name        = "driver-rpc"
+      port        = 7078
+      target_port = 7078
+      protocol    = "TCP"
+    }
+
+    port {
+      name        = "blockmanager"
+      port        = 7079
+      target_port = 7079
+      protocol    = "TCP"
+    }
+
+    type = "ClusterIP"
+    cluster_ip = "None"  # Headless service for better DNS resolution
   }
 }
 
@@ -358,7 +382,8 @@ resource "kubernetes_deployment" "spark_worker" {
             curl -L -o iceberg-spark-runtime-3.5_2.12-1.4.3.jar https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.4.3/iceberg-spark-runtime-3.5_2.12-1.4.3.jar && \
             curl -L -o hadoop-aws-3.3.4.jar https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar && \
             curl -L -o aws-java-sdk-bundle-1.12.262.jar https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar && \
-            curl -L -o postgresql-42.6.0.jar https://jdbc.postgresql.org/download/postgresql-42.6.0.jar
+            curl -L -o postgresql-42.6.0.jar https://jdbc.postgresql.org/download/postgresql-42.6.0.jar && \
+            curl -L -o iceberg-aws-1.4.3.jar https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws/1.4.3/iceberg-aws-1.4.3.jar
             EOT
           ]
 

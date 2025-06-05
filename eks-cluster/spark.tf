@@ -36,6 +36,9 @@ resource "kubernetes_config_map" "spark_config" {
       spark.serializer=org.apache.spark.serializer.KryoSerializer
       spark.sql.adaptive.enabled=true
       spark.sql.adaptive.coalescePartitions.enabled=true
+      
+      # Required JARs
+      spark.jars.packages=org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.4.3,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262
       EOF
 
     "hive-site.xml" = <<-EOF
@@ -43,19 +46,19 @@ resource "kubernetes_config_map" "spark_config" {
       <configuration>
         <property>
           <name>javax.jdo.option.ConnectionURL</name>
-          <value>jdbc:derby:;databaseName=/tmp/metastore_db;create=true</value>
+          <value>jdbc:postgresql://${aws_db_instance.hive_metastore.endpoint}/hivemetastore</value>
         </property>
         <property>
           <name>javax.jdo.option.ConnectionDriverName</name>
-          <value>org.apache.derby.jdbc.EmbeddedDriver</value>
+          <value>org.postgresql.Driver</value>
         </property>
         <property>
           <name>javax.jdo.option.ConnectionUserName</name>
-          <value>app</value>
+          <value>hive</value>
         </property>
         <property>
           <name>javax.jdo.option.ConnectionPassword</name>
-          <value>mine</value>
+          <value>${var.db_password}</value>
         </property>
         <property>
           <name>hive.metastore.uris</name>
@@ -70,6 +73,34 @@ resource "kubernetes_config_map" "spark_config" {
           <value>spark</value>
         </property>
       </configuration>
+      EOF
+  }
+}
+
+# Custom Spark Docker image with required JARs
+resource "kubernetes_config_map" "spark_dockerfile" {
+  metadata {
+    name = "spark-dockerfile"
+  }
+
+  data = {
+    "Dockerfile" = <<-EOF
+      FROM apache/spark:3.5.1
+      
+      USER root
+      
+      # Install Python and pip
+      RUN apt-get update && apt-get install -y python3-pip wget curl && \
+          pip3 install pyspark==3.5.1 boto3 pandas pyarrow
+      
+      # Download required JARs
+      RUN cd /opt/spark/jars && \
+          wget https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.4.3/iceberg-spark-runtime-3.5_2.12-1.4.3.jar && \
+          wget https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar && \
+          wget https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar && \
+          wget https://jdbc.postgresql.org/download/postgresql-42.6.0.jar
+      
+      USER 185
       EOF
   }
 }
@@ -117,11 +148,37 @@ resource "kubernetes_deployment" "spark_master" {
           effect   = "NoSchedule"
         }
 
+        # Init container to download JARs
+        init_container {
+          name  = "download-jars"
+          image = "curlimages/curl:8.7.1"
+          
+          command = ["/bin/sh"]
+          args = ["-c", <<-EOT
+            cd /jars && \
+            curl -L -o iceberg-spark-runtime-3.5_2.12-1.4.3.jar https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.4.3/iceberg-spark-runtime-3.5_2.12-1.4.3.jar && \
+            curl -L -o hadoop-aws-3.3.4.jar https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar && \
+            curl -L -o aws-java-sdk-bundle-1.12.262.jar https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar && \
+            curl -L -o postgresql-42.6.0.jar https://jdbc.postgresql.org/download/postgresql-42.6.0.jar
+            EOT
+          ]
+
+          volume_mount {
+            name       = "spark-jars"
+            mount_path = "/jars"
+          }
+        }
+
         container {
           name  = "spark-master-node"
           image = "apache/spark:3.5.1"
-          command = ["/opt/spark/bin/spark-class"]
-          args = ["org.apache.spark.deploy.master.Master", "--host", "0.0.0.0", "--port", "7077", "--webui-port", "8080"]
+          command = ["/bin/bash"]
+          args = ["-c", <<-EOT
+            cp /shared-jars/*.jar /opt/spark/jars/ && \
+            /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master \
+            --host 0.0.0.0 --port 7077 --webui-port 8080
+            EOT
+          ]
 
           port {
             container_port = 7077
@@ -183,6 +240,11 @@ resource "kubernetes_deployment" "spark_master" {
             mount_path = "/opt/spark/conf"
           }
 
+          volume_mount {
+            name       = "spark-jars"
+            mount_path = "/shared-jars"
+          }
+
           resources {
             requests = {
               cpu    = "500m"
@@ -200,6 +262,11 @@ resource "kubernetes_deployment" "spark_master" {
           config_map {
             name = kubernetes_config_map.spark_config.metadata[0].name
           }
+        }
+
+        volume {
+          name = "spark-jars"
+          empty_dir {}
         }
       }
     }
@@ -280,11 +347,37 @@ resource "kubernetes_deployment" "spark_worker" {
           effect   = "NoSchedule"
         }
 
+        # Init container to download JARs
+        init_container {
+          name  = "download-jars"
+          image = "curlimages/curl:8.7.1"
+          
+          command = ["/bin/sh"]
+          args = ["-c", <<-EOT
+            cd /jars && \
+            curl -L -o iceberg-spark-runtime-3.5_2.12-1.4.3.jar https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.4.3/iceberg-spark-runtime-3.5_2.12-1.4.3.jar && \
+            curl -L -o hadoop-aws-3.3.4.jar https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar && \
+            curl -L -o aws-java-sdk-bundle-1.12.262.jar https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar && \
+            curl -L -o postgresql-42.6.0.jar https://jdbc.postgresql.org/download/postgresql-42.6.0.jar
+            EOT
+          ]
+
+          volume_mount {
+            name       = "spark-jars"
+            mount_path = "/jars"
+          }
+        }
+
         container {
           name  = "spark-worker"
           image = "apache/spark:3.5.1"
-          command = ["/opt/spark/bin/spark-class"]
-          args = ["org.apache.spark.deploy.worker.Worker", "--webui-port", "8081", "spark://spark-master-svc:7077"]
+          command = ["/bin/bash"]
+          args = ["-c", <<-EOT
+            cp /shared-jars/*.jar /opt/spark/jars/ && \
+            /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker \
+            --webui-port 8081 spark://spark-master-svc:7077
+            EOT
+          ]
 
           port {
             container_port = 8081
@@ -352,6 +445,11 @@ resource "kubernetes_deployment" "spark_worker" {
             mount_path = "/opt/spark/conf"
           }
 
+          volume_mount {
+            name       = "spark-jars"
+            mount_path = "/shared-jars"
+          }
+
           resources {
             requests = {
               cpu    = "500m"
@@ -369,6 +467,11 @@ resource "kubernetes_deployment" "spark_worker" {
           config_map {
             name = kubernetes_config_map.spark_config.metadata[0].name
           }
+        }
+
+        volume {
+          name = "spark-jars"
+          empty_dir {}
         }
       }
     }

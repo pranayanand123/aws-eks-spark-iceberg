@@ -384,7 +384,3 @@ resource "kubernetes_service" "hive_metastore_svc" {
     type = "ClusterIP"
   }
 }
-
-output "rds_endpoint" {
-  value = aws_db_instance.hive_metastore.endpoint
-}

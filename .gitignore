@@ -6,3 +6,6 @@
 # Terraform directories
 **/.terraform/*
 **/.terraform.lock.info
+
+# Terraform variables
+**/*.tfvars
